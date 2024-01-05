@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2006, Michael Kazhdan and Matthew Bolitho
+Copyright (c) 2014, Michael Kazhdan
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
@@ -47,8 +47,7 @@ DAMAGE.
 #include "VertexFactory.h"
 #include "Image.h"
 #include "RegularGrid.h"
-
-MessageWriter messageWriter;
+#include "DataStream.imp.h"
 
 cmdLineParameter< char* >
 	InValues( "inValues" ) ,
@@ -65,7 +64,6 @@ cmdLineReadable
 	PrimalGrid( "primalGrid" ) ,
 	ExactInterpolation( "exact" ) ,
 	InCore( "inCore" ) ,
-	NoComments( "noComments" ) ,
 	PolygonMesh( "polygonMesh" ) ,
 	NonManifold( "nonManifold" ) ,
 	NonLinearFit( "nonLinearFit" ) ,
@@ -115,7 +113,7 @@ cmdLineReadable* params[] =
 	&InValues , &InGradients ,
 	&Out , &Depth , &Transform ,
 	&Width ,
-	&Scale , &Verbose , &CGSolverAccuracy , &NoComments ,
+	&Scale , &Verbose , &CGSolverAccuracy ,
 	&NonManifold , &PolygonMesh , &ASCII , &ShowResidual ,
 	&ValueWeight , &GradientWeight ,
 	&LapWeight , &BiLapWeight ,
@@ -175,8 +173,6 @@ void ShowUsage(char* ex)
 	printf( "\t[--%s <iso-value>=%f]\n" , IsoValue.name , IsoValue.value );
 	printf( "\t[--%s]\n" , Performance.name );
 	printf( "\t[--%s]\n" , PrimalGrid.name );
-	printf( "\t[--%s]\n" , NoComments.name );
-	printf( "\t[--%s]\n" , PolygonMesh.name );
 	printf( "\t[--%s]\n" , NonManifold.name );
 	printf( "\t[--%s]\n" , NonLinearFit.name );
 	printf( "\t[--%s]\n" , ASCII.name );
@@ -184,33 +180,6 @@ void ShowUsage(char* ex)
 	printf( "\t[--%s]\n" , Verbose.name );
 }
 
-template< unsigned int Dim , class Real >
-struct FEMTreeProfiler
-{
-	FEMTree< Dim , Real >& tree;
-	double t;
-
-	FEMTreeProfiler( FEMTree< Dim , Real >& t ) : tree(t) { ; }
-	void start( void ){ t = Time() , FEMTree< Dim , Real >::ResetLocalMemoryUsage(); }
-	void print( const char* header ) const
-	{
-		FEMTree< Dim , Real >::MemoryUsage();
-		if( header ) printf( "%s %9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" , header , Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-		else         printf(    "%9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" ,          Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-	}
-	void dumpOutput( const char* header ) const
-	{
-		FEMTree< Dim , Real >::MemoryUsage();
-		if( header ) messageWriter( "%s %9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" , header , Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-		else         messageWriter(    "%9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" ,          Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-	}
-	void dumpOutput2( std::vector< std::string >& comments , const char* header ) const
-	{
-		FEMTree< Dim , Real >::MemoryUsage();
-		if( header ) messageWriter( comments , "%s %9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" , header , Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-		else         messageWriter( comments ,    "%9.1f (s), %9.1f (MB) / %9.1f (MB) / %d (MB)\n" ,          Time()-t , FEMTree< Dim , Real >::LocalMemoryUsage() , FEMTree< Dim , Real >::MaxMemoryUsage() , MemoryInfo::PeakMemoryUsageMB() );
-	}
-};
 
 template< class Real , unsigned int Dim >
 XForm< Real , Dim+1 > GetBoundingBoxXForm( Point< Real , Dim > min , Point< Real , Dim > max , Real scaleFactor )
@@ -358,26 +327,24 @@ struct SystemDual< Dim , double , VectorTypeUnion< double , Point< double , Dim 
 	}
 };
 
-template< typename Real , typename SetVertexFunction , typename VertexFactory , unsigned int ... FEMSigs >
-void ExtractMesh
+template< typename Real , unsigned int ... FEMSigs >
+void ExtractLevelSet
 (
 	UIntPack< FEMSigs ... > ,
 	FEMTree< sizeof ... ( FEMSigs ) , Real >& tree ,
 	const DenseNodeData< Real , UIntPack< FEMSigs ... > >& solution ,
 	Real isoValue ,
-	const VertexFactory &vertexFactory ,
-	SetVertexFunction SetVertex ,
-	std::vector< std::string > &comments ,
-	XForm< Real , sizeof...(FEMSigs)+1 > unitCubeToModel
+	XForm< Real , sizeof...(FEMSigs)+1 > unitCubeToModel ,
+	std::vector< std::string > &comments
 )
 {
 	static const int Dim = sizeof ... ( FEMSigs );
 	typedef UIntPack< FEMSigs ... > Sigs;
 	static const unsigned int DataSig = FEMDegreeAndBType< WEIGHT_DEGREE , BOUNDARY_FREE >::Signature;
 
-	FEMTreeProfiler< Dim , Real > profiler( tree );
+	Profiler profiler(20);
 
-	char tempHeader[1024];
+	char tempHeader[2048];
 	{
 		char tempPath[1024];
 		tempPath[0] = 0;
@@ -388,30 +355,37 @@ void ExtractMesh
 		else                                                  sprintf( tempHeader , "%s%cPR_" , tempPath , FileSeparator );
 	}
 
-	typedef EmptyVectorType< Real > EmptyVectorType;
-	CoredMeshData< typename VertexFactory::VertexType , node_index_type > *mesh;
-	if( InCore.set ) mesh = new CoredVectorMeshData< typename VertexFactory::VertexType , node_index_type >();
-	else             mesh = new CoredFileMeshData< node_index_type , VertexFactory >( vertexFactory , tempHeader );
-	profiler.start();
-	typename IsoSurfaceExtractor< Dim , Real , typename VertexFactory::VertexType >::IsoStats isoStats;
-#if defined( __GNUC__ ) && __GNUC__ < 5
-#ifdef SHOW_WARNINGS
-#warning "you've got me gcc version<5"
-#endif // SHOW_WARNINGS
-	isoStats = IsoSurfaceExtractor< Dim , Real , typename VertexFactory::VertexType >::template Extract< EmptyVectorType >( Sigs() , UIntPack< WEIGHT_DEGREE >() , UIntPack< DataSig >() , tree , (typename FEMTree< Dim , Real >::template DensityEstimator< WEIGHT_DEGREE >*)NULL , (SparseNodeData< ProjectiveData< EmptyVectorType , Real > , IsotropicUIntPack< Dim , DataSig > > *)NULL , solution , isoValue , *mesh , EmptyVectorType() , SetVertex , NonLinearFit.set , false , !NonManifold.set , PolygonMesh.set , false );
-#else // !__GNUC__ || __GNUC__ >=5
-	isoStats = IsoSurfaceExtractor< Dim , Real , typename VertexFactory::VertexType >::template Extract< EmptyVectorType >( Sigs() , UIntPack< WEIGHT_DEGREE >() , UIntPack< DataSig >() , tree , (typename FEMTree< Dim , Real >::template DensityEstimator< WEIGHT_DEGREE >*)NULL , NULL , solution , isoValue , *mesh , EmptyVectorType() , SetVertex , NonLinearFit.set , false , !NonManifold.set , PolygonMesh.set , false );
-#endif // __GNUC__ || __GNUC__ < 4
-	messageWriter( "Vertices / Polygons: %llu / %llu\n" , (unsigned long long)( mesh->outOfCoreVertexNum()+mesh->inCoreVertices.size() ) , (unsigned long long)mesh->polygonNum() );
-	std::string isoStatsString = isoStats.toString() + std::string( "\n" );
-	messageWriter( isoStatsString.c_str() );
-	if( PolygonMesh.set ) profiler.dumpOutput2( comments , "#         Got polygons:" );
-	else                  profiler.dumpOutput2( comments , "#        Got triangles:" );
+	// A description of the output vertex information
+	using VInfo = Reconstructor::OutputVertexInfo< Real , Dim , false , false >;
 
+	// A factory generating the output vertices
+	using Factory = typename VInfo::Factory;
+	Factory factory = VInfo::GetFactory();
+
+	// A backing stream for the vertices
+	Reconstructor::OutputInputFactoryTypeStream< Factory > vertexStream( factory , false , false , std::string( "v_" ) );
+	Reconstructor::OutputInputFaceStream< Dim-1 > faceStream( false , true , std::string( "f_" ) );
+	typename LevelSetExtractor< Real , Dim >::Stats stats;
+
+	{
+		// The wrapper converting native to output types
+		typename VInfo::StreamWrapper _vertexStream( vertexStream , factory() );
+		Reconstructor::TransformedOutputVertexStream< Real , Dim > __vertexStream( unitCubeToModel , _vertexStream );
+
+		// Extract the mesh
+		stats = LevelSetExtractor< Real , Dim >::Extract( Sigs() , UIntPack< 0 >() , tree , ( typename FEMTree< Dim , Real >::template DensityEstimator< 0 >* )NULL , solution , isoValue , __vertexStream , faceStream , NonLinearFit.set , false , !NonManifold.set , PolygonMesh.set , false );
+	}
+
+	if( Verbose.set )
+	{
+		std::cout << "Vertices / Faces: " << vertexStream.size() << " / " << faceStream.size() << std::endl;
+		std::cout << stats.toString() << std::endl;
+		std::cout << "#            Got faces: " << profiler << std::endl;
+	}
+
+	// Write the mesh to a .ply file
 	std::vector< std::string > noComments;
-	typename VertexFactory::Transform unitCubeToModelTransform( unitCubeToModel );
-	PLY::WritePolygons< VertexFactory , node_index_type , Real , Dim >( Out.value , vertexFactory , mesh , ASCII.set ? PLY_ASCII : PLY_BINARY_NATIVE , NoComments.set ? noComments : comments , unitCubeToModelTransform );
-	delete mesh;
+	PLY::Write< Factory , node_index_type , Real , Dim >( Out.value , factory , vertexStream.size() , faceStream.size() , vertexStream , faceStream , ASCII.set ? PLY_ASCII : PLY_BINARY_NATIVE , noComments );
 }
 
 template< typename Real , unsigned int Dim >
@@ -514,11 +488,49 @@ void Execute( UIntPack< FEMSigs ... > )
 	// The type of the input gradient
 	typedef typename InputSampleGradientFactory::VertexType InputSampleGradientType;
 
-	typedef            InputDataStream< InputSampleValueType >  InputPointValueStream;
-	typedef TransformedInputDataStream< InputSampleValueType > XInputPointValueStream;
-	typedef            InputDataStream< InputSampleGradientType >  InputPointGradientStream;
-	typedef TransformedInputDataStream< InputSampleGradientType > XInputPointGradientStream;
+	typedef InputDataStream< InputSampleValueType >  InputPointValueStream;
+	typedef InputDataStream< InputSampleGradientType >  InputPointGradientStream;
 
+	struct XInputPointValueStream : public InputDataStream< InputSampleValueType >
+	{
+		InputDataStream< InputSampleValueType > &stream;
+		XForm< Real , Dim+1 > pointTransform;
+		XInputPointValueStream( InputDataStream< InputSampleValueType > &stream , XForm< Real , Dim+1 > modelToUnitCube ) : stream(stream) , pointTransform( modelToUnitCube ){}
+		bool base_read( InputSampleValueType &s )
+		{
+			if( stream.read( s ) ){ s.template get<0>() = pointTransform * s.template get<0>() ; return true; }
+			else return false;
+		}
+		void reset( void ){ return stream.reset(); }
+	};
+	struct XInputPointGradientStream : public InputDataStream< InputSampleGradientType >
+	{
+		//    G(p) = F( A*p )
+		// F(p+d) = F(p) + < \nabla F(p) , d >
+		// G(p+d) = F( A*p ) + < \nabla F(A*p) , A*d >
+		//        = G(p) + < A^t * \nabla F(A*p) , d >
+		// => \nabla G(p) = A^t * \nabla F(A*p)
+
+		InputDataStream< InputSampleGradientType > &stream;
+		XForm< Real , Dim+1 > pointTransform;
+		XForm< Real , Dim > gradientTransform;
+		XInputPointGradientStream( InputDataStream< InputSampleGradientType > &stream , XForm< Real , Dim+1 > modelToUnitCube ) : stream(stream)
+		{
+			pointTransform = modelToUnitCube;
+			gradientTransform = XForm< Real , Dim >( pointTransform ).inverse().transpose();
+		}
+		bool base_read( InputSampleGradientType &s )
+		{
+			if( stream.read( s ) )
+			{
+				s.template get<0>() = pointTransform * s.template get<0>();
+				s.template get<1>() = gradientTransform * s.template get<1>().template get<0>();
+				return true;
+			}
+			else return false;
+		}
+		void reset( void ){ return stream.reset(); }
+	};
 	FunctionValueFactory functionValueFactory;
 	FunctionGradientFactory functionGradientFactory;
 
@@ -527,12 +539,15 @@ void Execute( UIntPack< FEMSigs ... > )
 
 	typedef RegularTreeNode< Dim , FEMTreeNodeData , depth_and_offset_type > FEMTreeNode;
 	std::vector< std::string > comments;
-	messageWriter( comments , "***********************************************\n" );
-	messageWriter( comments , "***********************************************\n" );
-	messageWriter( comments , "** Running Point Interpolant (Version %s) **\n" , VERSION );
-	messageWriter( comments , "***********************************************\n" );
-	messageWriter( comments , "***********************************************\n" );
-	if( !Threads.set ) messageWriter( comments , "Running with %d threads\n" , Threads.value );
+	if( Verbose.set )
+	{
+		std::cout << "***********************************************" << std::endl;
+		std::cout << "***********************************************" << std::endl;
+		std::cout << "** Running Point Interpolant (Version " << ADAPTIVE_SOLVERS_VERSION << ") **" << std::endl;
+		std::cout << "***********************************************" << std::endl;
+		std::cout << "***********************************************" << std::endl;
+		if( !Threads.set ) std::cout << "Running with " << Threads.value << " threads" << std::endl;
+	}
 
 	ThreadPool::Init( (ThreadPool::ParallelType)ParallelType.value , Threads.value );
 
@@ -563,14 +578,17 @@ void Execute( UIntPack< FEMSigs ... > )
 		if( params[i]->set )
 		{
 			params[i]->writeValue( str );
-			if( strlen( str ) ) messageWriter( comments , "\t--%s %s\n" , params[i]->name , str );
-			else                messageWriter( comments , "\t--%s\n" , params[i]->name );
+			if( Verbose.set )
+			{
+				if( strlen( str ) ) std::cout << "\t--" << params[i]->name << " " << str << std::endl;
+				else                std::cout << "\t--" << params[i]->name << std::endl;
+			}
 		}
 
 	double startTime = Time();
 
 	FEMTree< Dim , Real > tree( MEMORY_ALLOCATOR_BLOCK_SIZE );
-	FEMTreeProfiler< Dim , Real > profiler( tree );
+	Profiler profiler(20);
 
 	if( Depth.set && Width.value>0 )
 	{
@@ -587,7 +605,7 @@ void Execute( UIntPack< FEMSigs ... > )
 
 	// Read in the samples
 	{
-		profiler.start();
+		profiler.reset();
 		InputPointValueStream *pointValueStream = NULL;
 		InputPointGradientStream *pointGradientStream = NULL;
 		Point< Real , Dim > valueMin , valueMax , gradientMin , gradientMax;
@@ -604,11 +622,11 @@ void Execute( UIntPack< FEMSigs ... > )
 				if     ( !strcasecmp( ext , "bnpts" ) ) _pointValueStream = new BinaryInputDataStream< InputSampleValueFactory>( InValues.value , inputSampleValueFactory );
 				else if( !strcasecmp( ext , "ply"   ) ) _pointValueStream = new    PLYInputDataStream< InputSampleValueFactory>( InValues.value , inputSampleValueFactory );
 				else                                    _pointValueStream = new  ASCIIInputDataStream< InputSampleValueFactory>( InValues.value , inputSampleValueFactory );
-				InputSampleValueType s;
-				while( _pointValueStream->next( s ) ) inCorePointsAndValues.push_back( s );
+				InputSampleValueType s = inputSampleValueFactory();
+				while( _pointValueStream->read( s ) ) inCorePointsAndValues.push_back( s );
 				delete _pointValueStream;
 
-				pointValueStream = new MemoryInputDataStream< InputSampleValueType >( inCorePointsAndValues.size() , &inCorePointsAndValues[0] );
+				pointValueStream = new VectorBackedInputDataStream< InputSampleValueType >( inCorePointsAndValues );
 			}
 			else
 			{
@@ -618,10 +636,9 @@ void Execute( UIntPack< FEMSigs ... > )
 			}
 			delete[] ext;
 
-			typename InputSampleValueFactory::Transform _modelToUnitCube( modelToUnitCube );
-			auto XFormFunctor = [&]( InputSampleValueType &p ){ p = _modelToUnitCube( p ); };
-			XInputPointValueStream _pointStream( XFormFunctor , *pointValueStream );
-			InputPointStreamInfo< Real , Dim , FunctionValueType >::BoundingBox( _pointStream , valueMin , valueMax );
+			XInputPointValueStream _pointStream( *pointValueStream , modelToUnitCube );
+			FunctionValueType s = functionValueFactory();
+			InputPointStreamInfo< Real , Dim , FunctionValueType >::BoundingBox( _pointStream , s , valueMin , valueMax );
 		}
 		if( GradientWeight.value>0 )
 		{
@@ -633,11 +650,11 @@ void Execute( UIntPack< FEMSigs ... > )
 				if     ( !strcasecmp( ext , "bnpts" ) ) _pointGradientStream = new BinaryInputDataStream< InputSampleGradientFactory>( InGradients.value , inputSampleGradientFactory );
 				else if( !strcasecmp( ext , "ply"   ) ) _pointGradientStream = new    PLYInputDataStream< InputSampleGradientFactory>( InGradients.value , inputSampleGradientFactory );
 				else                                    _pointGradientStream = new  ASCIIInputDataStream< InputSampleGradientFactory>( InGradients.value , inputSampleGradientFactory );
-				InputSampleGradientType s;
-				while( _pointGradientStream->next( s ) ) inCorePointsAndGradients.push_back( s );
+				InputSampleGradientType s = inputSampleGradientFactory();
+				while( _pointGradientStream->read( s ) ) inCorePointsAndGradients.push_back( s );
 				delete _pointGradientStream;
 
-				pointGradientStream = new MemoryInputDataStream< InputSampleGradientType >( inCorePointsAndGradients.size() , &inCorePointsAndGradients[0] );
+				pointGradientStream = new VectorBackedInputDataStream< InputSampleGradientType >( inCorePointsAndGradients );
 			}
 			else
 			{
@@ -647,10 +664,9 @@ void Execute( UIntPack< FEMSigs ... > )
 			}
 			delete[] ext;
 
-			typename InputSampleGradientFactory::Transform _modelToUnitCube( modelToUnitCube );
-			auto XFormFunctor = [&]( InputSampleGradientType &p ){ p = _modelToUnitCube( p ); };
-			XInputPointGradientStream _pointStream( XFormFunctor , *pointGradientStream );
-			InputPointStreamInfo< Real , Dim , FunctionGradientType >::BoundingBox( _pointStream , gradientMin , gradientMax );
+			XInputPointGradientStream _pointStream( *pointGradientStream , modelToUnitCube );
+			FunctionGradientType s = functionGradientFactory();
+			InputPointStreamInfo< Real , Dim , FunctionGradientType >::BoundingBox( _pointStream , s , gradientMin , gradientMax );
 		}
 
 		{
@@ -685,11 +701,11 @@ void Execute( UIntPack< FEMSigs ... > )
 		if( ValueWeight.value>0 )
 		{
 			valueSamples = new std::vector< typename FEMTree< Dim , Real >::PointSample >();
-			typename InputSampleValueFactory::Transform _modelToUnitCube( modelToUnitCube );
-			auto XFormFunctor = [&]( InputSampleValueType &p ){ p = _modelToUnitCube( p ); };
-			XInputPointValueStream _pointStream( XFormFunctor , *pointValueStream );
+			XInputPointValueStream _pointStream( *pointValueStream , modelToUnitCube );
 			auto ProcessData = []( const Point< Real , Dim > &p , FunctionValueType &d ){ return (Real)1.; };
-			pointValueCount = FEMTreeInitializer< Dim , Real >::template Initialize< FunctionValueType >( tree.spaceRoot() , _pointStream , Depth.value , *valueSamples , *valueSampleData , true , tree.nodeAllocators.size() ? tree.nodeAllocators[0] : NULL , tree.initializer() , ProcessData );
+			FunctionValueType zeroValue = functionValueFactory();
+			typename FEMTreeInitializer< Dim , Real >::StreamInitializationData sid;
+			pointValueCount = FEMTreeInitializer< Dim , Real >::template Initialize< FunctionValueType >( sid , tree.spaceRoot() , _pointStream , zeroValue , Depth.value , *valueSamples , *valueSampleData , true , tree.nodeAllocators.size() ? tree.nodeAllocators[0] : NULL , tree.initializer() , ProcessData );
 			delete pointValueStream;
 		}
 		else pointValueCount = 0;
@@ -697,20 +713,23 @@ void Execute( UIntPack< FEMSigs ... > )
 		if( GradientWeight.value>0 )
 		{
 			gradientSamples = new std::vector< typename FEMTree< Dim , Real >::PointSample >();
-			typename InputSampleGradientFactory::Transform _modelToUnitCube( modelToUnitCube );
-			auto XFormFunctor = [&]( InputSampleGradientType &p ){ p = _modelToUnitCube( p ); };
-			XInputPointGradientStream _pointStream( XFormFunctor , *pointGradientStream );
+			XInputPointGradientStream _pointStream( *pointGradientStream , modelToUnitCube );
 			auto ProcessData = []( const Point< Real , Dim > &p , FunctionGradientType &d ){ return (Real)1.; };
-			pointGradientCount = FEMTreeInitializer< Dim , Real >::template Initialize< FunctionGradientType >( tree.spaceRoot() , _pointStream , Depth.value , *gradientSamples , *gradientSampleData , true , tree.nodeAllocators.size() ? tree.nodeAllocators[0] : NULL , tree.initializer() , ProcessData );
+			FunctionGradientType zeroGradient = functionGradientFactory();
+			typename FEMTreeInitializer< Dim , Real >::StreamInitializationData sid;
+			pointGradientCount = FEMTreeInitializer< Dim , Real >::template Initialize< FunctionGradientType >( sid , tree.spaceRoot() , _pointStream , zeroGradient , Depth.value , *gradientSamples , *gradientSampleData , true , tree.nodeAllocators.size() ? tree.nodeAllocators[0] : NULL , tree.initializer() , ProcessData );
 			delete pointGradientStream;
 		}
 		else pointGradientCount = 0;
 
 		unitCubeToModel = modelToUnitCube.inverse();
 
-		if( valueSamples ) messageWriter( "Input Value Points / Value Samples: %llu / %llu\n" , pointValueCount , (unsigned long long)valueSamples->size() );
-		if( gradientSamples ) messageWriter( "Input Gradient Points / Gradient Samples: %llu / %llu\n" , pointGradientCount , (unsigned long long)gradientSamples->size() );
-		profiler.dumpOutput2( comments , "# Read input into tree:" );
+		if( Verbose.set )
+		{
+			if( valueSamples ) std::cout << "Input Value Points / Value Samples: " << pointValueCount << " / " << valueSamples->size() << std::endl;
+			if( gradientSamples ) std::cout << "Input Gradient Points / Gradient Samples: " << pointGradientCount << " / " << gradientSamples->size() << std::endl;
+			std::cout << "# Read input into tree: " << profiler << std::endl;
+		}
 	}
 
 	DenseNodeData< Real , Sigs > solution;
@@ -725,50 +744,56 @@ void Execute( UIntPack< FEMSigs ... > )
 		if( ValueWeight.value>0 )
 		{
 			if( ExactInterpolation.set ) valueInterpolationInfo = FEMTree< Dim , Real >::template       InitializeExactPointAndDataInterpolationInfo< Real , FunctionValueType , 0 >( tree , *valueSamples , GetPointer( *valueSampleData ) , ConstraintDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , SystemDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , true , false );
-			else                         valueInterpolationInfo = FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , FunctionValueType , 0 >( tree , *valueSamples , GetPointer( *valueSampleData ) , ConstraintDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , SystemDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , true , 1 );
+			else                         valueInterpolationInfo = FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , FunctionValueType , 0 >( tree , *valueSamples , GetPointer( *valueSampleData ) , ConstraintDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , SystemDual< Dim , Real , FunctionValueType >( (Real)ValueWeight.value ) , true , Depth.value , 1 );
 		}
 		if( GradientWeight.value>0 )
 		{
 			if( ExactInterpolation.set ) gradientInterpolationInfo = FEMTree< Dim , Real >::template       InitializeExactPointAndDataInterpolationInfo< Real , FunctionGradientType , 1 >( tree , *gradientSamples , GetPointer( *gradientSampleData ) , ConstraintDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , SystemDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , true , false );
-			else                         gradientInterpolationInfo = FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , FunctionGradientType , 1 >( tree , *gradientSamples , GetPointer( *gradientSampleData ) , ConstraintDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , SystemDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , true , 1 );
+			else                         gradientInterpolationInfo = FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , FunctionGradientType , 1 >( tree , *gradientSamples , GetPointer( *gradientSampleData ) , ConstraintDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , SystemDual< Dim , Real , FunctionGradientType >( (Real)GradientWeight.value ) , true , Depth.value , 1 );
 		}
 
 		// Prepare for multigrid
 		{
-			profiler.start();
+			profiler.reset();
+
+			auto addNodeFunctor = [&]( int d , const int off[Dim] ){ return d<=FullDepth.value; };
 			if( ValueWeight.value>0 && GradientWeight.value>0 )
-				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , FullDepth.value , []( const FEMTreeNode * ){ return true; } , []( const FEMTreeNode * ){ return false; } , std::make_tuple( valueInterpolationInfo , gradientInterpolationInfo ) );
+				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , addNodeFunctor , []( const FEMTreeNode * ){ return true; } , std::make_tuple( valueInterpolationInfo , gradientInterpolationInfo ) );
 			else if( ValueWeight.value>0 )
-				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , FullDepth.value , []( const FEMTreeNode * ){ return true; } , []( const FEMTreeNode * ){ return false; } , std::make_tuple( valueInterpolationInfo                             ) );
+				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , addNodeFunctor , []( const FEMTreeNode * ){ return true; } , std::make_tuple( valueInterpolationInfo                             ) );
 			else if( GradientWeight.value>0 )
-				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , FullDepth.value , []( const FEMTreeNode * ){ return true; } , []( const FEMTreeNode * ){ return false; } , std::make_tuple(                          gradientInterpolationInfo ) );
-			profiler.dumpOutput2( comments , "#       Finalized tree:" );
+				tree.template finalizeForMultigrid< Degrees::Max() , Degrees::Max() >( BaseDepth.value , addNodeFunctor , []( const FEMTreeNode * ){ return true; } , std::make_tuple(                          gradientInterpolationInfo ) );
+
+			if( Verbose.set ) std::cout << "#       Finalized tree: " << profiler << std::endl;
 		}
 
 		// Add the interpolation constraints
 		{
-			profiler.start();
+			profiler.reset();
 			constraints = tree.initDenseNodeData( Sigs() );
 			if( ValueWeight.value>0 && GradientWeight.value>0 ) tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( valueInterpolationInfo , gradientInterpolationInfo ) );
 			else if( ValueWeight.value>0 )                      tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( valueInterpolationInfo                             ) );
 			else if( GradientWeight.value>0 )                   tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple(                          gradientInterpolationInfo ) );
-			profiler.dumpOutput2( comments , "#Set point constraints:" );
+			if( Verbose.set ) std::cout << "#Set point constraints: " << profiler << std::endl;
 		}
 
-		messageWriter( "Leaf Nodes / Active Nodes / Ghost Nodes: %llu / %llu / %llu\n" , (unsigned long long)tree.leaves() , (unsigned long long)tree.nodes() , (unsigned long long)tree.ghostNodes() );
-		messageWriter( "Memory Usage: %.3f MB\n" , float( MemoryInfo::Usage())/(1<<20) );
+		if( Verbose.set )
+		{
+			std::cout << "All Nodes / Active Nodes / Ghost Nodes: " << tree.allNodes() << " / " << tree.activeNodes() << " / " << tree.ghostNodes() << std::endl;
+			std::cout << "Memory Usage: " << float( MemoryInfo::Usage() )/(1<<20) << " MB" << std::endl;
+		}
 
 		// Solve the linear system
 		{
-			profiler.start();
+			profiler.reset();
 			typename FEMTree< Dim , Real >::SolverInfo sInfo;
 			sInfo.cgDepth = 0 , sInfo.cascadic = true , sInfo.vCycles = 1 , sInfo.iters = Iters.value , sInfo.cgAccuracy = CGSolverAccuracy.value , sInfo.verbose = Verbose.set , sInfo.showResidual = ShowResidual.set , sInfo.showGlobalResidual = SHOW_GLOBAL_RESIDUAL_NONE , sInfo.sliceBlockSize = 1;
 			sInfo.baseVCycles = BaseVCycles.value;
 			typename FEMIntegrator::template System< Sigs , IsotropicUIntPack< Dim , 2 > > F( { 0. , (double)LapWeight.value , (double)BiLapWeight.value } );
-			if( ValueWeight.value>0 && GradientWeight.value>0 ) solution = tree.solveSystem( Sigs() , F , constraints , SolveDepth.value , sInfo , std::make_tuple( valueInterpolationInfo , gradientInterpolationInfo ) );
-			else if( ValueWeight.value>0 )                      solution = tree.solveSystem( Sigs() , F , constraints , SolveDepth.value , sInfo , std::make_tuple( valueInterpolationInfo                             ) );
-			else if( GradientWeight.value>0 )                   solution = tree.solveSystem( Sigs() , F , constraints , SolveDepth.value , sInfo , std::make_tuple(                          gradientInterpolationInfo ) );
-			profiler.dumpOutput2( comments , "# Linear system solved:" );
+			if( ValueWeight.value>0 && GradientWeight.value>0 ) solution = tree.solveSystem( Sigs() , F , constraints , BaseDepth.value , SolveDepth.value , sInfo , std::make_tuple( valueInterpolationInfo , gradientInterpolationInfo ) );
+			else if( ValueWeight.value>0 )                      solution = tree.solveSystem( Sigs() , F , constraints , BaseDepth.value , SolveDepth.value , sInfo , std::make_tuple( valueInterpolationInfo                             ) );
+			else if( GradientWeight.value>0 )                   solution = tree.solveSystem( Sigs() , F , constraints , BaseDepth.value , SolveDepth.value , sInfo , std::make_tuple(                          gradientInterpolationInfo ) );
+			if( Verbose.set ) std::cout << "# Linear system solved: " << profiler << std::endl;
 			delete valueInterpolationInfo , valueInterpolationInfo = NULL;
 			delete gradientInterpolationInfo , gradientInterpolationInfo = NULL;
 		}
@@ -796,7 +821,7 @@ void Execute( UIntPack< FEMSigs ... > )
 			}
 			);
 			for( unsigned int t=0 ; t<ThreadPool::NumThreads() ; t++ ) valueStat.first += valueStats[t].first , valueStat.second += valueStats[t].second;
-			messageWriter( "Value Error: %g\n" , (Real)sqrt( valueStat.first / valueStat.second ) );
+			if( Verbose.set ) std::cout << "Value Error: " << sqrt( valueStat.first / valueStat.second ) << std::endl;
 		}
 		if( gradientSamples )
 		{
@@ -819,7 +844,7 @@ void Execute( UIntPack< FEMSigs ... > )
 			}
 			);
 			for( unsigned int t=0 ; t<ThreadPool::NumThreads() ; t++ ) gradientStat.first += gradientStats[t].first , gradientStat.second += gradientStats[t].second;
-			messageWriter( "Gradient Error: %g\n" , (Real)sqrt( gradientStat.first / gradientStat.second ) );
+			if( Verbose.set ) std::cout << "Gradient Error: " << sqrt( gradientStat.first / gradientStat.second ) << std::endl;
 		}
 	}
 
@@ -832,21 +857,22 @@ void Execute( UIntPack< FEMSigs ... > )
 	{
 		FILE* fp = fopen( Tree.value , "wb" );
 		if( !fp ) ERROR_OUT( "Failed to open file for writing: " , Tree.value );
-		FEMTree< Dim , Real >::WriteParameter( fp );
-		DenseNodeData< Real , Sigs >::WriteSignatures( fp );
-		tree.write( fp , modelToUnitCube );
-		solution.write( fp );
+		FileStream fs( fp );
+		FEMTree< Dim , Real >::WriteParameter( fs );
+		DenseNodeData< Real , Sigs >::WriteSignatures( fs );
+		tree.write( fs , modelToUnitCube , false );
+		solution.write( fs );
 		fclose( fp );
 	}
 
 	if( Grid.set )
 	{
 		int res = 0;
-		profiler.start();
+		profiler.reset();
 		Pointer( Real ) values = tree.template regularGridEvaluate< true >( solution , res , -1 , PrimalGrid.set );
 		size_t resolution = 1;
 		for( int d=0 ; d<Dim ; d++ ) resolution *= res;
-		profiler.dumpOutput( "Got grid:" );
+		if( Verbose.set ) std::cout << "Got grid: " << profiler << std::endl;
 		XForm< Real , Dim+1 > voxelToUnitCube = XForm< Real , Dim+1 >::Identity();
 		if( PrimalGrid.set ) for( int d=0 ; d<Dim ; d++ ) voxelToUnitCube( d , d ) = (Real)( 1. / (res-1) );
 		else                 for( int d=0 ; d<Dim ; d++ ) voxelToUnitCube( d , d ) = (Real)( 1. / res ) , voxelToUnitCube( Dim , d ) = (Real)( 0.5 / res );
@@ -856,13 +882,11 @@ void Execute( UIntPack< FEMSigs ... > )
 
 	if( Out.set )
 	{
-		if( Dim==3 )
+		if constexpr ( Dim==3 )
 		{
-			typedef VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::EmptyFactory< Real > > VertexFactory;
-			std::function< void ( typename VertexFactory::VertexType & , Point< Real , Dim > , Point< Real , Dim > , Real , EmptyVectorType< Real > ) > SetVertex = []( typename VertexFactory::VertexType &v , Point< Real , Dim > p , Point< Real , Dim > , Real , EmptyVectorType< Real > ){ v.template get<0>() = p; };
-			ExtractMesh( UIntPack< FEMSigs ... >() , tree , solution , (Real)IsoValue.value , VertexFactory() , SetVertex , comments , unitCubeToModel );
+			ExtractLevelSet( UIntPack< FEMSigs ... >() , tree , solution , (Real)IsoValue.value , unitCubeToModel , comments );
 		}
-		else if( Dim==2 )
+		else if constexpr ( Dim==2 )
 		{
 			typedef VertexFactory::PositionFactory< Real , 3 > VertexFactory;
 			int res = 0;
@@ -891,11 +915,11 @@ void Execute( UIntPack< FEMSigs ... > )
 			DeletePointer( values );
 
 			std::vector< std::string > noComments;
-			PLY::WritePolygons( Out.value , VertexFactory() , vertices , polygons , ASCII.set ? PLY_ASCII : PLY_BINARY_NATIVE , NoComments.set ? noComments : comments );
+			PLY::WritePolygons( Out.value , VertexFactory() , vertices , polygons , ASCII.set ? PLY_ASCII : PLY_BINARY_NATIVE , noComments );
 		}
 	}
 
-	messageWriter( comments , "#          Total Solve: %9.1f (s), %9.1f (MB)\n" , Time()-startTime , FEMTree< Dim , Real >::MaxMemoryUsage() );
+	if( Verbose.set ) std::cout <<"#          Total Solve: " << Time()-startTime << " (s), " << MemoryInfo::PeakMemoryUsageMB() << " (MB)" << std::endl;
 }
 
 #ifndef FAST_COMPILE
@@ -928,11 +952,6 @@ void Execute( void )
 int main( int argc , char* argv[] )
 {
 	Timer timer;
-#ifdef USE_SEG_FAULT_HANDLER
-	WARN( "using seg-fault handler" );
-	StackTracer::exec = argv[0];
-	signal( SIGSEGV , SignalHandler );
-#endif // USE_SEG_FAULT_HANDLER
 #ifdef ARRAY_DEBUG
 	WARN( "Array debugging enabled" );
 #endif // ARRAY_DEBUG
@@ -942,7 +961,6 @@ int main( int argc , char* argv[] )
 	if( MaxMemoryGB.value>0 ) SetPeakMemoryMB( MaxMemoryGB.value<<10 );
 	ThreadPool::DefaultChunkSize = ThreadChunkSize.value;
 	ThreadPool::DefaultSchedule = (ThreadPool::ScheduleType)ScheduleType.value;
-	messageWriter.echoSTDOUT = Verbose.set;
 
 	if( !InValues.set && !InGradients.set )
 	{

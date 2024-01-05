@@ -41,8 +41,9 @@ DAMAGE.
 #include "CmdLineParser.h"
 #include "Geometry.h"
 #include "Ply.h"
-#include "VertexStream.h"
+#include "DataStream.h"
 #include "VertexFactory.h"
+#include "DataStream.imp.h"
 
 cmdLineParameters< char* > In( "in" );
 cmdLineParameter< char* > Out( "out" );
@@ -102,15 +103,15 @@ void Read( char *const *fileNames , unsigned int fileNum , VertexDataFactory ver
 			if( !strcasecmp( ext , "bnpts" ) ) pointStream = new BinaryInputDataStream< FullVertexFactory< Real , Dim , VertexDataFactory > >( fileNames[i] , vertexFactory );
 			else                               pointStream = new  ASCIIInputDataStream< FullVertexFactory< Real , Dim , VertexDataFactory > >( fileNames[i] , vertexFactory );
 			size_t count = 0;
-			VertexType< Real , Dim , VertexDataFactory > v;
-			while( pointStream->next( v ) ) count++;
+			VertexType< Real , Dim , VertexDataFactory > v = vertexFactory();
+			while( pointStream->read( v ) ) count++;
 			pointStream->reset();
-			_vertices.resize( count );
+			_vertices.resize( count , v );
 			comments.resize( 0 );
 			ft = PLY_BINARY_NATIVE;
 
 			count = 0;
-			while( pointStream->next( _vertices[count++] ) );
+			while( pointStream->read( _vertices[count++] ) );
 			delete pointStream;
 		}
 		delete[] ext;
@@ -142,7 +143,7 @@ void WritePoints( const char *fileName , int ft , VertexDataFactory vertexDataFa
 	if     ( !strcasecmp( ext , "ply"   ) ) pointStream = new    PLYOutputDataStream< FullVertexFactory< Real , Dim , VertexDataFactory > >( fileName , vertexFactory , vertices.size() , ft );
 	else if( !strcasecmp( ext , "bnpts" ) ) pointStream = new BinaryOutputDataStream< FullVertexFactory< Real , Dim , VertexDataFactory > >( fileName , vertexFactory );
 	else                                    pointStream = new  ASCIIOutputDataStream< FullVertexFactory< Real , Dim , VertexDataFactory > >( fileName , vertexFactory );
-	for( size_t i=0 ; i<vertices.size() ; i++ ) pointStream->next( vertices[i] );
+	for( size_t i=0 ; i<vertices.size() ; i++ ) pointStream->write( vertices[i] );
 	delete pointStream;
 
 	delete[] ext;
@@ -549,11 +550,6 @@ int main( int argc , char* argv[] )
 	static constexpr unsigned int Dim = 3;
 
 	cmdLineParse( argc-1 , &argv[1] , params );
-#ifdef USE_SEG_FAULT_HANDLER
-	WARN( "using seg-fault handler" );
-	StackTracer::exec = argv[0];
-	signal( SIGSEGV , SignalHandler );
-#endif // USE_SEG_FAULT_HANDLER
 #ifdef ARRAY_DEBUG
 	WARN( "Array debugging enabled" );
 #endif // ARRAY_DEBUG

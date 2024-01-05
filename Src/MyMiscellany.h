@@ -28,7 +28,8 @@ DAMAGE.
 #ifndef MY_MISCELLANY_INCLUDED
 #define MY_MISCELLANY_INCLUDED
 
-#include "PreProcessor.h"
+#include <iostream>
+#include <sstream>
 
 //////////////////
 // OpenMP Stuff //
@@ -36,6 +37,28 @@ DAMAGE.
 #ifdef _OPENMP
 #include <omp.h>
 #endif // _OPENMP
+
+////////////////////////////
+// Formatted float output //
+////////////////////////////
+struct StreamFloatPrecision
+{
+	StreamFloatPrecision( std::ostream &str , unsigned int precision , bool scientific=false ) : _str(str)
+	{
+		_defaultPrecision = (int)_str.precision();
+		_str.precision( precision );
+		if( scientific ) _str << std::scientific;
+		else             _str << std::fixed;
+	}
+	~StreamFloatPrecision( void )
+	{
+		_str << std::defaultfloat;
+		_str.precision( _defaultPrecision );
+	}
+protected:
+	int _defaultPrecision;
+	std::ostream &_str;
+};
 
 ////////////////
 // Time Stuff //
@@ -66,7 +89,16 @@ struct Timer
 {
 	Timer( void ){ _startCPUClock = std::clock() , _startWallClock = std::chrono::system_clock::now(); }
 	double cpuTime( void ) const{ return (std::clock() - _startCPUClock) / (double)CLOCKS_PER_SEC; };
-	double wallTime( void ) const{  std::chrono::duration<double> diff = (std::chrono::system_clock::now() - _startWallClock) ; return diff.count(); }
+	double wallTime( void ) const{ std::chrono::duration<double> diff = (std::chrono::system_clock::now() - _startWallClock) ; return diff.count(); }
+	std::string operator()( bool showCpuTime , unsigned int precision=1 ) const
+	{
+		std::stringstream ss;
+		StreamFloatPrecision sfp( ss , precision );
+		ss << wallTime() << " (s)";
+		if( showCpuTime ) ss << " / " << cpuTime() << " (s)";
+		return ss.str();
+	}
+	friend std::ostream &operator << ( std::ostream &os , const Timer &timer ){ return os << timer(false); }
 protected:
 	std::clock_t _startCPUClock;
 	std::chrono::time_point< std::chrono::system_clock > _startWallClock;
@@ -89,88 +121,20 @@ const char FileSeparator = '/';
 #endif // _WIN32 || _WIN64
 #endif // !SetTempDirectory
 
-#include <stdarg.h>
-#include <vector>
-#include <string>
-struct MessageWriter
+#if defined( _WIN32 ) || defined( _WIN64 )
+#include <io.h>
+inline void FSync( FILE *fp )
 {
-	char* outputFile;
-	bool echoSTDOUT;
-	MessageWriter( void ){ outputFile = NULL , echoSTDOUT = true; }
-	void operator() ( const char* format , ... )
-	{
-		if( outputFile )
-		{
-			FILE* fp = fopen( outputFile , "a" );
-			va_list args;
-			va_start( args , format );
-			vfprintf( fp , format , args );
-			fclose( fp );
-			va_end( args );
-		}
-		if( echoSTDOUT )
-		{
-			va_list args;
-			va_start( args , format );
-			vprintf( format , args );
-			va_end( args );
-		}
-	}
-	void operator() ( std::vector< char* >& messages  , const char* format , ... )
-	{
-		if( outputFile )
-		{
-			FILE* fp = fopen( outputFile , "a" );
-			va_list args;
-			va_start( args , format );
-			vfprintf( fp , format , args );
-			fclose( fp );
-			va_end( args );
-		}
-		if( echoSTDOUT )
-		{
-			va_list args;
-			va_start( args , format );
-			vprintf( format , args );
-			va_end( args );
-		}
-		// [WARNING] We are not checking the string is small enough to fit in 1024 characters
-		messages.push_back( new char[1024] );
-		char* str = messages.back();
-		va_list args;
-		va_start( args , format );
-		vsprintf( str , format , args );
-		va_end( args );
-		if( str[strlen(str)-1]=='\n' ) str[strlen(str)-1] = 0;
-	}
-	void operator() ( std::vector< std::string >& messages  , const char* format , ... )
-	{
-		if( outputFile )
-		{
-			FILE* fp = fopen( outputFile , "a" );
-			va_list args;
-			va_start( args , format );
-			vfprintf( fp , format , args );
-			fclose( fp );
-			va_end( args );
-		}
-		if( echoSTDOUT )
-		{
-			va_list args;
-			va_start( args , format );
-			vprintf( format , args );
-			va_end( args );
-		}
-		// [WARNING] We are not checking the string is small enough to fit in 1024 characters
-		char message[1024];
-		va_list args;
-		va_start( args , format );
-		vsprintf( message , format , args );
-		va_end( args );
-		if( message[strlen(message)-1]=='\n' ) message[strlen(message)-1] = 0;
-		messages.push_back( std::string( message ) );
-	}
-};
+	//	FlushFileBuffers( (HANDLE)_fileno( fp ) );
+	_commit( _fileno( fp ) );
+}
+#else // !_WIN32 && !_WIN64
+#include <unistd.h>
+inline void FSync( FILE *fp )
+{
+	fsync( fileno( fp ) );
+}
+#endif // _WIN32 || _WIN64
 
 /////////////////////////////////////
 // Exception, Warnings, and Errors //
@@ -231,7 +195,7 @@ namespace MKExceptions
 	void ErrorOut( const char *fileName , int line , const char *functionName , const char *format , Args ... args )
 	{
 		std::cerr << MakeMessageString( "[ERROR]" , fileName , line , functionName , format , args ... ) << std::endl;
-		exit( 0 );
+		exit( EXIT_FAILURE );
 	}
 }
 #ifndef WARN
@@ -246,6 +210,28 @@ namespace MKExceptions
 #ifndef ERROR_OUT
 #define ERROR_OUT( ... ) MKExceptions::ErrorOut( __FILE__ , __LINE__ , __FUNCTION__ , __VA_ARGS__ )
 #endif // ERROR_OUT
+
+struct FunctionCallNotifier
+{
+	FunctionCallNotifier( std::string str ) : _str(str)
+	{
+		_depth = _Depth++;
+		for( unsigned int i=0 ; i<_depth ; i++ ) std::cout << "  ";
+		std::cout << "[START] " << _str << std::endl;
+	};
+	~FunctionCallNotifier( void )
+	{
+		for( unsigned int i=0 ; i<_depth ; i++ ) std::cout << "  ";
+		std::cout << "[END] " << _str << std::endl;
+		_Depth--;
+	}
+protected:
+	static unsigned int _Depth;
+	unsigned int _depth;
+	std::string _str;
+};
+unsigned int FunctionCallNotifier::_Depth = 0;
+#define FUNCTION_NOTIFY FunctionCallNotifier ___myFunctionCallNotifier___( __FUNCTION__ )
 
 #include <signal.h>
 #if defined(_WIN32) || defined( _WIN64 )
@@ -338,12 +324,55 @@ inline void SignalHandler( int signal )
 {
 	printf( "Signal: %d\n" , signal );
 	StackTracer::Trace();
-	exit( 0 );
+	exit( EXIT_FAILURE );
 };
 
 
 template< typename Value > bool SetAtomic( volatile Value *value , Value newValue , Value oldValue );
 template< typename Data > void AddAtomic( Data& a , Data b );
+
+//////////////////////////////////
+// File-backed streaming memory //
+//////////////////////////////////
+#include "Array.h"
+class FileBackedReadWriteStream
+{
+public:
+	struct FileDescription
+	{
+		FILE *fp;
+		char fileName[2048];
+
+		FileDescription( void ) : fp(NULL) { fileName[0] = 0; }
+		FileDescription( const FileDescription &fd ) : fp(fd.fp) { strcpy( fileName , fd.fileName ); }
+		FileDescription( FILE *fp ) : fp(fp) { fileName[0] = 0; }
+		FileDescription( const char *fileHeader ) : fp(NULL)
+		{
+			if( fileHeader && strlen(fileHeader) ) sprintf( fileName , "%sXXXXXX" , fileHeader );
+			else strcpy( fileName , "XXXXXX" );
+#ifdef _WIN32
+			_mktemp( fileName );
+			fp = fopen( fileName , "w+b" );
+#else // !_WIN32
+			fp = fdopen( mkstemp( fileName ) , "w+b" );
+#endif // _WIN32
+			if( !fp ) ERROR_OUT( "Failed to open file: " , fileName );
+		}
+		void remove( void ){ if( fp ){ fclose( fp ) ; fp = NULL ; std::remove( fileName ); } }
+	};
+
+	FileBackedReadWriteStream( const char* fileHeader="" ) : _fd( fileHeader ) , _fileHandleOwner(true) {}
+	FileBackedReadWriteStream( FILE *fp ) : _fd(fp) , _fileHandleOwner(false) {}
+	~FileBackedReadWriteStream( void ){ if( _fileHandleOwner ) _fd.remove(); }
+	bool write( ConstPointer(char) data , size_t size ){ return fwrite( data , sizeof(char) , size , _fd.fp )==size; }
+	bool read( Pointer(char) data , size_t size ){ return fread( data , sizeof(char) , size , _fd.fp )==size; }
+	void reset( void ){ fseek( _fd.fp , 0 , SEEK_SET ); }
+protected:
+	bool _fileHandleOwner;
+	FileDescription _fd;
+};
+
+
 
 ////////////////////
 // MKThread Stuff //
@@ -588,7 +617,7 @@ bool SetAtomic64( volatile Value *value , Value newValue , Value oldValue )
 }
 
 template< typename Number >
-void AddAtomic32( Number &a , Number b )
+void AddAtomic32( volatile Number &a , Number b )
 {
 #if defined( _WIN32 ) || defined( _WIN64 )
 	Number current = a;
@@ -606,7 +635,7 @@ void AddAtomic32( Number &a , Number b )
 }
 
 template< typename Number >
-void AddAtomic64( Number &a , Number b )
+void AddAtomic64( volatile Number &a , Number b )
 {
 #if 1
 	Number current = a;
@@ -762,11 +791,95 @@ struct VectorWrapper : public std::vector< Data >
 size_t getPeakRSS( void );
 size_t getCurrentRSS( void );
 
+struct Profiler
+{
+	Profiler( unsigned int ms=0 )
+	{
+		_t = Time();
+		_currentPeak = 0;
+		if( ms )
+		{
+			_thread = std::thread( &Profiler::_updatePeakMemoryFunction , std::ref( *this ) , ms );
+			_spawnedSampler = true;
+		}
+		else _spawnedSampler = false;
+	}
+
+	~Profiler( void )
+	{
+		if( _spawnedSampler )
+		{
+			{
+				std::lock_guard< std::mutex > lock( _mutex );
+				_terminate = true;
+			}
+			_thread.join();
+		}
+	}
+
+	void reset( void )
+	{
+		_t = Time();
+		if( _spawnedSampler )
+		{
+			std::lock_guard< std::mutex > lock( _mutex );
+			_currentPeak = 0;
+		}
+		else _currentPeak = 0;
+	}
+
+	void update( void )
+	{
+		size_t currentPeak = getCurrentRSS();
+		if( _spawnedSampler )
+		{
+			std::lock_guard< std::mutex > lock( _mutex );
+			if( currentPeak>_currentPeak ) _currentPeak = currentPeak;
+		}
+		else if( currentPeak>_currentPeak ) _currentPeak = currentPeak;
+	}
+
+	std::string operator()( bool showTime=true ) const
+	{
+		std::stringstream ss;
+		double dt = Time()-_t;
+		double  localPeakMB = ( (double)_currentPeak )/(1<<20);
+		double globalPeakMB = ( (double)getPeakRSS() )/(1<<20);
+		{
+			StreamFloatPrecision sfp( ss , 1 );
+			if( showTime ) ss << dt << " (s), ";
+			ss << localPeakMB << " (MB) / " << globalPeakMB << " (MB)";
+		}
+		return ss.str();
+	}
+
+	friend std::ostream &operator << ( std::ostream &os , const Profiler &profiler ){ return os << profiler(); }
+
+protected:
+	std::thread _thread;
+	std::mutex _mutex;
+	bool _spawnedSampler;
+	double _t;
+	volatile size_t _currentPeak;
+	volatile bool _terminate;
+
+	void _updatePeakMemoryFunction( unsigned int ms )
+	{
+		while( true )
+		{
+			std::this_thread::sleep_for( std::chrono::milliseconds( ms ) );
+			update();
+			if( _terminate ) return;
+		}
+	};
+};
+
 struct MemoryInfo
 {
 	static size_t Usage( void ){ return getCurrentRSS(); }
 	static int PeakMemoryUsageMB( void ){ return (int)( getPeakRSS()>>20 ); }
 };
+
 #if defined( _WIN32 ) || defined( _WIN64 )
 #include <Windows.h>
 #include <Psapi.h>
@@ -917,14 +1030,5 @@ inline size_t getCurrentRSS( )
 	return (size_t)0L;          /* Unsupported. */
 #endif
 }
-
-#include "Array.h"
-template< typename C >
-struct Serializer
-{
-	virtual size_t size( void ) const = 0;
-	virtual void   serialize( const C & , Pointer( char ) buffer ) const = 0;
-	virtual void deserialize( ConstPointer( char ) buffer , C & ) const = 0;
-};
 
 #endif // MY_MISCELLANY_INCLUDED
