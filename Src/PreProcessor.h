@@ -38,7 +38,7 @@ DAMAGE.
 #endif // BIG_DATA
 						
 //#define SANITIZED_PR								// If enabled, produces CLANG-sanitized code [thread/undefined/address]
-//#define FAST_COMPILE								// If enabled, only a single version of the code is compiled
+#define FAST_COMPILE								// If enabled, only a single version of the code is compiled
 #undef SHOW_WARNINGS							// Display compilation warnings
 #undef ARRAY_DEBUG								// If enabled, array access is tested for validity
 
