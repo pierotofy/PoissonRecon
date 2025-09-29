@@ -616,7 +616,7 @@ int main( int argc , char* argv[] )
 	static const BoundaryType BType = Reconstructor::Poisson::DefaultFEMBoundary;
 	static const unsigned int Dim = DEFAULT_DIMENSION;
 	static const unsigned int FEMSig = FEMDegreeAndBType< Degree , BType >::Signature;
-	MK_WARN( "Compiled for degree-" , Degree , ", boundary-" , BoundaryNames[ BType ] , ", " , sizeof(Real)==4 ? "single" : "double" , "-precision _only_" );
+	// MK_WARN( "Compiled for degree-" , Degree , ", boundary-" , BoundaryNames[ BType ] , ", " , sizeof(Real)==4 ? "single" : "double" , "-precision _only_" );
 	if( !PointWeight.set ) PointWeight.value = Reconstructor::Poisson::WeightMultiplier*Degree;
 	char *ext = GetFileExtension( In.value );
 	if( !strcasecmp( ext , "ply" ) )
